@@ -140,6 +140,10 @@ JITFunction::JITFunction(JIT *jit, cell address)
 	cell data = reinterpret_cast<cell>(jit_->GetAmxData());
 	cell code = reinterpret_cast<cell>(jit_->GetAmxCode());
 
+	void *stk = reinterpret_cast<void*>(&amx->stk);
+	void *frm = reinterpret_cast<void*>(&amx->frm);
+	void *hea = reinterpret_cast<void*>(&amx->hea);
+
 	std::vector<AMXInstruction> instructions;
 	jit_->AnalyzeFunction(address_, instructions);
 
@@ -183,11 +187,13 @@ JITFunction::JITFunction(JIT *jit, cell address)
 			break;
 		case OP_LOAD_S_PRI: // offset
 			// PRI = [FRM + offset]
-			as.mov(eax, dword_ptr(ebp, instr.GetOperand()));
+			as.mov(edx, dword_ptr_abs(frm));
+			as.mov(eax, dword_ptr(edx, data + instr.GetOperand()));
 			break;
 		case OP_LOAD_S_ALT: // offset
 			// ALT = [FRM + offset]
-			as.mov(ecx, dword_ptr(ebp, instr.GetOperand()));
+			as.mov(edx, dword_ptr_abs(frm));
+			as.mov(ecx, dword_ptr(edx, data + instr.GetOperand()));
 			break;
 		case OP_LREF_PRI: // address
 			// PRI = [ [address] ]
@@ -201,12 +207,14 @@ JITFunction::JITFunction(JIT *jit, cell address)
 			break;
 		case OP_LREF_S_PRI: // offset
 			// PRI = [ [FRM + offset] ]
-			as.mov(edx, dword_ptr(ebp, instr.GetOperand()));
+			as.mov(edx, dword_ptr_abs(frm));
+			as.mov(edx, dword_ptr(edx, data + instr.GetOperand()));
 			as.mov(eax, dword_ptr(edx, data));
 			break;
 		case OP_LREF_S_ALT: // offset
 			// PRI = [ [FRM + offset] ]
-			as.mov(edx, dword_ptr(ebp, instr.GetOperand()));
+			as.mov(edx, dword_ptr_abs(frm));
+			as.mov(edx, dword_ptr(edx, data + instr.GetOperand()));
 			as.mov(ecx, dword_ptr(edx, data));
 			break;
 		case OP_LOAD_I:
@@ -236,11 +244,13 @@ JITFunction::JITFunction(JIT *jit, cell address)
 			break;
 		case OP_ADDR_PRI: // offset
 			// PRI = FRM + offset
-			as.lea(eax, dword_ptr(ebp, instr.GetOperand() - data));
+			as.mov(edx, dword_ptr_abs(frm));
+			as.lea(eax, dword_ptr(edx, instr.GetOperand()));
 			break;
 		case OP_ADDR_ALT: // offset
 			// ALT = FRM + offset
-			as.lea(ecx, dword_ptr(ebp, instr.GetOperand() - data));
+			as.mov(edx, dword_ptr_abs(frm));
+			as.lea(ecx, dword_ptr(edx, instr.GetOperand()));
 			break;
 		case OP_STOR_PRI: // address
 			// [address] = PRI
@@ -251,12 +261,14 @@ JITFunction::JITFunction(JIT *jit, cell address)
 			as.mov(dword_ptr_abs(reinterpret_cast<void*>(data + instr.GetOperand())), ecx);
 			break;
 		case OP_STOR_S_PRI: // offset
-			// [FRM + offset] = ALT
-			as.mov(dword_ptr(ebp, instr.GetOperand()), eax);
+			// [FRM + offset] = PRI
+			as.mov(edx, dword_ptr_abs(frm));
+			as.mov(dword_ptr(edx, data + instr.GetOperand()), eax);
 			break;
 		case OP_STOR_S_ALT: // offset
 			// [FRM + offset] = ALT
-			as.mov(dword_ptr(ebp, instr.GetOperand()), ecx);
+			as.mov(edx, dword_ptr_abs(frm));
+			as.mov(dword_ptr(edx, data + instr.GetOperand()), ecx);
 			break;
 		case OP_SREF_PRI: // address
 			// [ [address] ] = PRI
@@ -270,12 +282,14 @@ JITFunction::JITFunction(JIT *jit, cell address)
 			break;
 		case OP_SREF_S_PRI: // offset
 			// [ [FRM + offset] ] = PRI
-			as.mov(edx, dword_ptr(ebp, instr.GetOperand()));
+			as.mov(edx, dword_ptr_abs(frm));
+			as.mov(edx, dword_ptr(edx, data + instr.GetOperand()));
 			as.mov(dword_ptr(edx, data), eax);
 			break;
 		case OP_SREF_S_ALT: // offset
 			// [ [FRM + offset] ] = ALT
-			as.mov(edx, dword_ptr(ebp, instr.GetOperand()));
+			as.mov(edx, dword_ptr_abs(frm));
+			as.mov(edx, dword_ptr(edx, data + instr.GetOperand()));
 			as.mov(dword_ptr(edx, data), ecx);
 			break;
 		case OP_STOR_I:
@@ -333,11 +347,14 @@ JITFunction::JITFunction(JIT *jit, cell address)
 			case 2:
 				as.mov(eax, dword_ptr_abs(reinterpret_cast<void*>(&amx->hea)));
 				break;
+			case 3:
+				as.mov(eax, dword_ptr_abs(reinterpret_cast<void*>(&amx->stp)));
+				break;
 			case 4:
-				as.lea(eax, dword_ptr(esp, -data));
+				as.mov(eax, dword_ptr_abs(reinterpret_cast<void*>(&amx->stk)));
 				break;
 			case 5:
-				as.lea(eax, dword_ptr(ebp, -data));
+				as.mov(eax, dword_ptr_abs(reinterpret_cast<void*>(&amx->frm)));
 				break;
 			default:
 				throw UnsupportedInstructionError(instr);
@@ -375,47 +392,68 @@ JITFunction::JITFunction(JIT *jit, cell address)
 			break;
 		case OP_PUSH_PRI:
 			// [STK] = PRI, STK = STK - cell size
-			as.push(eax);
+			as.sub(dword_ptr_abs(stk), sizeof(cell));
+			as.mov(edx, dword_ptr_abs(stk));
+			as.mov(dword_ptr(edx, data), eax);
 			break;
 		case OP_PUSH_ALT:
 			// [STK] = ALT, STK = STK - cell size
-			as.push(ecx);
+			as.sub(dword_ptr_abs(stk), sizeof(cell));
+			as.mov(edx, dword_ptr_abs(stk));
+			as.mov(dword_ptr(edx, data), ecx);
 			break;
 		case OP_PUSH_R: // value
 			// obsolete
 			break;
 		case OP_PUSH_C: // value
 			// [STK] = value, STK = STK - cell size
-			as.push(instr.GetOperand());
+			as.sub(dword_ptr_abs(stk), sizeof(cell));
+			as.mov(edx, dword_ptr_abs(stk));
+			as.mov(dword_ptr(edx, data), instr.GetOperand());
 			break;
 		case OP_PUSH: // address
 			// [STK] = [address], STK = STK - cell size
-			as.push(dword_ptr_abs(reinterpret_cast<void*>(instr.GetOperand() + data)));
+			as.sub(dword_ptr_abs(stk), sizeof(cell));
+			as.mov(edx, dword_ptr_abs(stk));
+			as.mov(edi, dword_ptr_abs(0, data + instr.GetOperand()));
+			as.mov(dword_ptr(edx, data), edi);
 			break;
 		case OP_PUSH_S: // offset
 			// [STK] = [FRM + offset], STK = STK - cell size
-			as.push(dword_ptr(ebp, instr.GetOperand()));
+			as.sub(dword_ptr_abs(stk), sizeof(cell));
+			as.mov(edx, dword_ptr_abs(stk));
+			as.mov(edi, dword_ptr_abs(frm, data + instr.GetOperand()));
+			as.mov(dword_ptr(edx, data), edi);
 			break;
 		case OP_POP_PRI:
-			// STK = STK + cell size, PRI = [STK]
-			as.pop(eax);
+			// STK = STK + cell size, PRI = [STK]			
+			as.mov(edx, dword_ptr_abs(stk));
+			as.mov(eax, dword_ptr(edx, data));
+			as.add(dword_ptr_abs(stk), sizeof(cell));
 			break;
 		case OP_POP_ALT:
 			// STK = STK + cell size, ALT = [STK]
-			as.pop(ecx);
+			as.mov(edx, dword_ptr_abs(stk));
+			as.mov(ecx, dword_ptr(edx, data));
+			as.add(dword_ptr_abs(stk), sizeof(cell));
 			break;
 		case OP_STACK: // value
 			// ALT = STK, STK = STK + value
-			as.lea(ecx, dword_ptr(esp, -data));
-			as.add(esp, instr.GetOperand());
+			as.mov(ecx, dword_ptr_abs(stk));
+			as.add(dword_ptr_abs(stk), instr.GetOperand());
 			break;
 		case OP_HEAP: // value
 			// ALT = HEA, HEA = HEA + value
-			as.mov(ecx, dword_ptr_abs(reinterpret_cast<void*>(&amx->hea)));
-			as.add(dword_ptr_abs(reinterpret_cast<void*>(&amx->hea)), instr.GetOperand());
+			as.mov(ecx, dword_ptr_abs(hea));
+			as.add(dword_ptr_abs(hea), instr.GetOperand());
 			break;
 		case OP_PROC:
 			// [STK] = FRM, STK = STK - cell size, FRM = STK
+			as.sub(dword_ptr(edx, data), sizeof(cell));
+			as.mov(esi, dword_ptr_abs(frm));
+			as.mov(edx, dword_ptr_abs(stk));			
+			as.mov(dword_ptr(edx, data), esi);
+			as.mov(dword_ptr_abs(frm), edx);
 			as.push(ebp);
 			as.mov(ebp, esp);
 			break;
@@ -876,7 +914,9 @@ JITFunction::JITFunction(JIT *jit, cell address)
 				goto ordinary_native;
 			}
 		ordinary_native:
-			as.push(esp);
+			as.mov(edx, dword_ptr_abs(stk));
+			as.lea(edx, dword_ptr(edx, data));
+			as.push(edx);
 			as.push(reinterpret_cast<int>(amx));
 			switch (instr.GetOpcode()) {
 				case OP_SYSREQ_C:					
@@ -970,8 +1010,10 @@ JITFunction::JITFunction(JIT *jit, cell address)
 			break;
 		case OP_PUSH_ADR: // offset
 			// [STK] = FRM + offset, STK = STK - cell size
-			as.lea(edx, dword_ptr(ebp, instr.GetOperand() - data));
-			as.push(edx);
+			as.sub(dword_ptr_abs(stk), sizeof(cell));
+			as.mov(edx, dword_ptr_abs(frm));
+			as.lea(edx, dword_ptr(edx, instr.GetOperand()));
+			as.mov(dword_ptr_abs(stk), edx);
 			break;
 		case OP_NOP:
 			// no-operation, for code alignment
