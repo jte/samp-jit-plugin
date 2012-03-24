@@ -65,9 +65,9 @@
 	#endif
 #endif
 
-static cell STDCALL CallFunction(jit::JIT *jit, cell address, cell *params) {
+static cell STDCALL CallFunction(jit::JIT *jit, cell address) {
 	cell retval;
-	jit->CallFunction(address, params, &retval);
+	jit->CallFunction(address, &retval);
 	return retval;
 }
 
@@ -461,10 +461,23 @@ void *JITAssembler::CompileFunction(cell address) {
 				call(fn);
 			} else {
 				// The current function calls itself directly or indirectly.
-				push(esp);
+				// Sync amx->stk and amx->frm with esp and ebp respectively.
+				lea(edx, dword_ptr(ebp, -data));
+				mov(dword_ptr_abs(reinterpret_cast<void*>(&amx->frm)), edx);
+				lea(edx, dword_ptr(esp, -data));
+				mov(dword_ptr_abs(reinterpret_cast<void*>(&amx->stk)), edx);
+				// Switch to real stack.
+				mov(ebp, dword_ptr_abs(reinterpret_cast<void*>(&jit_->ebp_)));
+				mov(esp, dword_ptr_abs(reinterpret_cast<void*>(&jit_->esp_)));
+				// Do CallFunction(address, params).
 				push(fn_addr);
 				push(reinterpret_cast<int>(jit_));
-				call(reinterpret_cast<int>(::CallFunction));
+				call(reinterpret_cast<void*>(::CallFunction));
+				// Switch back to AMX stack.
+				mov(edx, dword_ptr_abs(reinterpret_cast<void*>(&amx->frm)));
+				lea(ebp, dword_ptr(edx, data));
+				mov(edx, dword_ptr_abs(reinterpret_cast<void*>(&amx->stk)));
+				lea(esp, dword_ptr(edx, data));
 			}
 			add(esp, dword_ptr(esp));
 			add(esp, 4);
@@ -855,13 +868,6 @@ void *JITAssembler::CompileFunction(cell address) {
 			bind(L_good);
 			break;
 		}
-		case OP_SYSREQ_PRI:
-			// call system service, service number in PRI
-			push(esp);
-			push(eax);
-			push(reinterpret_cast<int>(jit_));
-			call(reinterpret_cast<void*>(::CallNativeFunction));
-			break;
 		case OP_SYSREQ_C:   // index
 		case OP_SYSREQ_D: { // address
 			// call system service
@@ -888,7 +894,18 @@ void *JITAssembler::CompileFunction(cell address) {
 				goto ordinary_native;
 			}
 		ordinary_native:
-			push(esp);
+			// Sync amx->stk and amx->frm with esp and ebp respectively.
+			lea(edx, dword_ptr(ebp, -data));
+			mov(dword_ptr_abs(reinterpret_cast<void*>(&amx->frm)), edx);
+			lea(edx, dword_ptr(esp, -data));
+			mov(dword_ptr_abs(reinterpret_cast<void*>(&amx->stk)), edx);
+			// Keep pointer to "params" before we change esp.
+			mov(ecx, esp);
+			// Switch to real stack.
+			mov(ebp, dword_ptr_abs(reinterpret_cast<void*>(&jit_->ebp_)));
+			mov(esp, dword_ptr_abs(reinterpret_cast<void*>(&jit_->esp_)));
+			// Call native function.
+			push(ecx);
 			push(reinterpret_cast<int>(amx));
 			switch (instr.GetOpcode()) {
 				case OP_SYSREQ_C:					
@@ -899,6 +916,11 @@ void *JITAssembler::CompileFunction(cell address) {
 					break;
 			}
 			add(esp, 8);
+			// Switch back to AMX stack.
+			mov(edx, dword_ptr_abs(reinterpret_cast<void*>(&amx->frm)));
+			lea(ebp, dword_ptr(edx, data));
+			mov(edx, dword_ptr_abs(reinterpret_cast<void*>(&amx->stk)));
+			lea(esp, dword_ptr(edx, data));
 		special_native:
 			break;
 		}
@@ -1312,67 +1334,79 @@ void *JIT::GetFunction(cell address) {
 	}
 }
 
-void JIT::CallFunction(cell address, cell *params, cell *retval) {
-	int parambytes = params[0];
-	int paramcount = parambytes / sizeof(cell);
+void JIT::CallFunction(cell address, cell *retval) {
+	static void *start;
+	start = GetFunction(address);
 
-	// Get pointer to assembled native code.
-	void *start = GetFunction(address);
-
-	// Copy parameters from AMX stack and call the function.
+	cell *stack = reinterpret_cast<cell*>(data_ + amx_->stk);
 	cell retval_;
+
+	void *cur_esp;
+	void *cur_ebp;
+
 	#if defined COMPILER_MSVC
 		__asm {
 			push esi
 			push edi
-		}
-		for (int i = paramcount; i >= 0; --i) {
-			__asm {
-				mov eax, dword ptr [i]
-				mov ecx, dword ptr [params]
-				push dword ptr [ecx + eax * 4]
-			}
-		}
-		__asm {
-			mov eax, dword ptr [this]
-			lea ecx, dword ptr [esp - 4]
-			mov dword ptr [eax].halt_esp_, ecx
-			mov dword ptr [eax].halt_ebp_, ebp
-			call dword ptr [start]
-			mov dword ptr [retval_], eax
-			add esp, dword ptr [parambytes]
-			add esp, 4
-			pop edi
-			pop esi
+			push ecx
+			push ebx
+			mov dword ptr [cur_ebp], ebp
+			mov dword ptr [cur_esp], esp
 		}
 	#elif defined COMPILER_GCC
 		__asm__ __volatile__ (
 			"pushl %%esi;"
 			"pushl %%edi;"
-				: : : "%esp");
-		for (int i = paramcount; i >= 0; --i) {
-			__asm__ __volatile__ (
-				"pushl %0;"
-					: : "r"(params[i]) : "%esp");
-		}
-		__asm__ __volatile__ (
-			"leal -4(%%esp), %%eax;"
-			"movl %%eax, (%0);"
-			"movl %%ebp, (%1);"
+			"pushl %%ecx;"
+			"pushl %%ebx;"
+			"movl %%ebp, %0;"
+			"movl %%esp, %1;"
+				: "=r"(cur_ebp), "=r"(cur_esp)
 				:
-				: "r"(&halt_esp_), "r"(&halt_ebp_)
-				: "%eax");
+				: );
+	#endif
+
+	ebp_ = cur_ebp;
+	esp_ = cur_esp;
+	halt_ebp_ = ebp_;
+	halt_esp_ = reinterpret_cast<char*>(esp_) - 4;
+
+	#if defined COMPILER_MSVC
+		__asm {
+			mov esp, dword ptr [stack]
+			mov ebx, ebp
+			call dword ptr [start]			
+			mov ebp, ebx
+			mov esp, dword ptr [cur_esp]
+			pop ebx
+			pop ecx
+			pop edi
+			pop esi
+			mov dword ptr [retval_], eax
+		}
+	#elif defined COMPILER_GCC
+		__asm__ __volatile__ (			
+			"movl %%edx, %%esp;"
+			"movl %%ebp, %%ebx;"
+			"call *%%eax;"
+				:
+				: "a"(start), "d"(stack)
+				: );
 		__asm__ __volatile__ (
-			"calll *%1;"
-			"movl %%eax, %0;"
-				: "=r"(retval_)
-				: "r"(start)
-				: "%eax", "%ecx", "%edx");
-		__asm__ __volatile__ (
-			"addl %0, %%esp;"
+			"movl %%ebx, %%ebp;"
+			"movl %0, %%esp;"
+			"popl %%ebx;"
+			"popl %%ecx;"
 			"popl %%edi;"
 			"popl %%esi;"
-				: : "r"(parambytes + 4) : "%esp");
+				:
+				: "r"(cur_esp)
+				: );
+		__asm__ __volatile__ (
+			"movl %%eax, %0;"
+				: "=r"(retval_)
+				:
+				: );
 	#endif
 
 	if (retval != 0) {
@@ -1385,10 +1419,9 @@ int JIT::CallPublicFunction(int index, cell *retval) {
 	// that a runtime error occured (e.g. array index out of bounds).
 	amx_->error = AMX_ERR_NONE;
 
-	amx_->stk -= sizeof(cell);
 	int paramcount = amx_->paramcount;
-	cell *params = reinterpret_cast<cell*>(data_ + amx_->stk);
-	params[0] = paramcount * sizeof(cell);
+	amx_->stk -= sizeof(cell);	
+	*reinterpret_cast<cell*>(amx_->stk + data_) = paramcount * sizeof(cell);
 
 	amx_->reset_hea = amx_->hea;
 	amx_->reset_stk = amx_->stk;
@@ -1397,10 +1430,10 @@ int JIT::CallPublicFunction(int index, cell *retval) {
 	if (address == 0) {
 		amx_->error = AMX_ERR_INDEX;
 	} else {
-		CallFunction(address, params, retval);
+		this->CallFunction(address, retval);
 	}
 
-	// Reset STK and_ parameter count.
+	// Reset parameter count.
 	amx_->stk += (paramcount + 1) * sizeof(cell);
 	amx_->paramcount = 0;
 

@@ -196,7 +196,7 @@ public:
 	// Call a function (and assemble if needed).
 	// The arguments passed to the function are copied from the AMX stack 
 	// onto the real stack.
-	void CallFunction(cell address, cell *params,cell *retval);
+	void CallFunction(cell address, cell *retval);
 
 	// Same as CallFunction() but for publics.
 	int CallPublicFunction(int index, cell *retval);
@@ -204,6 +204,11 @@ public:
 	// Call a native function. This method is currently used only for sysreq.pri.
 	// The sysreq.c and sysreq.d instructions invoke natives directly.
 	cell CallNativeFunction(int index, cell *params);
+
+	class Stack {
+	public:
+
+	};
 
 private:
 	// Disable copying.
@@ -219,6 +224,8 @@ private:
 
 	cell *opcode_list_;
 
+	void *ebp_;
+	void *esp_;
 	void *halt_ebp_;
 	void *halt_esp_;
 
